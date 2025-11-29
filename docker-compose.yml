@@ -1,0 +1,29 @@
+# Grimoire Engine Backend - Docker Compose Configuration
+# Orchestrates the FastAPI backend service with SQLite persistence
+
+services:
+  grimoire-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: grimoire-engine-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount data directory for SQLite database persistence
+      - ./data:/app/data
+    env_file:
+      # Load environment variables from .env file (optional)
+      - path: .env
+        required: false
+    environment:
+      # Override database URL to use mounted volume
+      - DATABASE_URL=sqlite+aiosqlite:///./data/grimoire.db
+    healthcheck:
+      # Health check using curl to /health endpoint
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped

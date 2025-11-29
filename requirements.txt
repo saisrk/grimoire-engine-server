@@ -1,0 +1,28 @@
+# Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Database
+sqlalchemy==2.0.44
+aiosqlite==0.21.0
+alembic==1.17.2
+greenlet==3.1.1
+
+# HTTP Client
+httpx==0.25.1
+
+# Configuration
+python-dotenv==1.0.0
+pydantic==2.10.5
+pydantic-settings==2.7.1
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+hypothesis==6.92.1
+
+# Code Quality
+ruff==0.1.6
+mypy==1.7.1
