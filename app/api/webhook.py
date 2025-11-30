@@ -8,7 +8,7 @@ It validates webhook signatures for security and processes PR events.
 import hashlib
 import hmac
 import logging
-import os
+import os, json
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -98,10 +98,10 @@ async def github_webhook(
             detail="Webhook secret not configured"
         )
     
-    # Read raw request body for signature validation
+    # Read raw request body first (required for signature validation)
     body = await request.body()
     
-    # Validate signature
+    # Validate signature before parsing
     if not x_hub_signature_256:
         logger.warning("Webhook request missing X-Hub-Signature-256 header")
         raise HTTPException(
@@ -122,9 +122,9 @@ async def github_webhook(
             detail="Invalid signature"
         )
     
-    # Parse JSON payload
+    # Parse JSON payload from the raw body
     try:
-        payload = await request.json()
+        payload = json.loads(body.decode("utf-8"))
     except Exception as e:
         logger.error(f"Failed to parse webhook payload: {e}")
         raise HTTPException(
