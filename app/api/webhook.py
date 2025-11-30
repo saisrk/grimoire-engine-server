@@ -55,7 +55,7 @@ def validate_signature(payload: bytes, signature: str, secret: str) -> bool:
     return hmac.compare_digest(computed_hash, expected_signature)
 
 
-@router.post("/webhook")
+@router.post("/webhook/github")
 async def github_webhook(
     request: Request,
     x_hub_signature_256: str = Header(None, alias="X-Hub-Signature-256"),
