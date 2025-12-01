@@ -13,9 +13,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 # Import the Base and all models for autogenerate support
-from app.models.spell import Base
+from app.db.database import Base
 # Import all models so Alembic can detect them
 from app.models.spell import Spell  # noqa: F401
+from app.models.user import User  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -110,6 +110,11 @@ DATABASE_URL=sqlite+aiosqlite:///./data/grimoire.db  # SQLite database path
 GITHUB_WEBHOOK_SECRET=your_webhook_secret_here       # Secret for webhook validation
 GITHUB_API_TOKEN=your_github_token_here              # Token for GitHub API requests
 
+# JWT Authentication Configuration
+SECRET_KEY=your_secret_key_here                      # Secret key for JWT signing (generate with: openssl rand -hex 32)
+ALGORITHM=HS256                                      # JWT signing algorithm
+ACCESS_TOKEN_EXPIRE_MINUTES=1440                     # Token expiration time (24 hours)
+
 # API Configuration
 API_HOST=0.0.0.0                 # Host to bind the server
 API_PORT=8000                    # Port to run the server
@@ -136,6 +141,20 @@ Create a Personal Access Token (PAT) or GitHub App token with the following perm
 
 Add the token to your `.env` file as `GITHUB_API_TOKEN`.
 
+### JWT Secret Key
+
+Generate a secure secret key for JWT token signing:
+
+```bash
+# Using OpenSSL (recommended)
+openssl rand -hex 32
+
+# Using Python
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Add the generated key to your `.env` file as `SECRET_KEY`. Never commit this key to version control.
+
 ## 📚 API Documentation
 
 ### Interactive Documentation
@@ -161,6 +180,158 @@ Returns the health status of the API.
   "service": "grimoire-engine-backend"
 }
 ```
+
+### Authentication API
+
+The authentication system uses JWT (JSON Web Token) for secure, stateless authentication. All protected endpoints require a valid Bearer token in the Authorization header.
+
+#### User Signup
+
+```http
+POST /auth/signup
+```
+
+Register a new user account with email and password.
+
+**Request Body:**
+```json
+{
+  "email": "user@example.com",
+  "password": "securepassword123"
+}
+```
+
+**Validation Rules:**
+- Email must be a valid email format
+- Password must be at least 8 characters long
+
+**Response (201 Created):**
+```json
+{
+  "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
+  "token_type": "bearer",
+  "user": {
+    "id": 1,
+    "email": "user@example.com",
+    "is_active": true,
+    "created_at": "2024-01-01T00:00:00Z"
+  }
+}
+```
+
+**Error Responses:**
+- `422 Unprocessable Entity`: Invalid email format or password too short
+- `409 Conflict`: Email already registered
+
+#### User Login
+
+```http
+POST /auth/login
+```
+
+Authenticate with email and password to receive an access token.
+
+**Request Body:**
+```json
+{
+  "email": "user@example.com",
+  "password": "securepassword123"
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "access_token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
+  "token_type": "bearer",
+  "user": {
+    "id": 1,
+    "email": "user@example.com",
+    "is_active": true,
+    "created_at": "2024-01-01T00:00:00Z"
+  }
+}
+```
+
+**Error Response:**
+- `401 Unauthorized`: Incorrect email or password
+
+#### User Logout
+
+```http
+POST /auth/logout
+```
+
+Log out the current user. Requires authentication.
+
+**Headers:**
+```
+Authorization: Bearer <your_access_token>
+```
+
+**Response (200 OK):**
+```json
+{
+  "message": "Successfully logged out"
+}
+```
+
+**Note:** In a stateless JWT system, logout is handled client-side by removing the token. The server confirms the request but doesn't invalidate the token server-side.
+
+**Error Response:**
+- `401 Unauthorized`: Missing or invalid token
+
+#### Get Current User
+
+```http
+GET /auth/me
+```
+
+Retrieve information about the currently authenticated user. This is a protected endpoint.
+
+**Headers:**
+```
+Authorization: Bearer <your_access_token>
+```
+
+**Response (200 OK):**
+```json
+{
+  "id": 1,
+  "email": "user@example.com",
+  "is_active": true,
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+**Error Responses:**
+- `401 Unauthorized`: Missing, invalid, or expired token
+
+#### Using Bearer Tokens
+
+After successful signup or login, include the access token in the Authorization header for all protected endpoints:
+
+```bash
+# Example using curl
+curl -H "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGc..." \
+  http://localhost:8000/auth/me
+
+# Example using httpie
+http GET http://localhost:8000/auth/me \
+  Authorization:"Bearer eyJ0eXAiOiJKV1QiLCJhbGc..."
+
+# Example using JavaScript fetch
+fetch('http://localhost:8000/auth/me', {
+  headers: {
+    'Authorization': 'Bearer eyJ0eXAiOiJKV1QiLCJhbGc...'
+  }
+})
+```
+
+**Token Details:**
+- Tokens expire after 24 hours
+- Tokens are signed with HS256 algorithm
+- Tokens contain user ID and expiration time
 
 #### Webhook Endpoint
 

@@ -63,7 +63,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # Create FastAPI application instance
 app = FastAPI(
     title="Grimoire Engine API",
-    description="Backend API for capturing GitHub PR errors and matching solution spells",
+    description=(
+        "Backend API for capturing GitHub PR errors and matching solution spells.\n\n"
+        "## Authentication\n\n"
+        "This API uses JWT (JSON Web Token) Bearer authentication. To access protected endpoints:\n\n"
+        "1. Register a new account using `POST /auth/signup`\n"
+        "2. Login with your credentials using `POST /auth/login`\n"
+        "3. Copy the `access_token` from the response\n"
+        "4. Click the 'Authorize' button (🔒) at the top of this page\n"
+        "5. Enter your token in the format: `Bearer <your_access_token>`\n"
+        "6. Click 'Authorize' and then 'Close'\n\n"
+        "Your token will be automatically included in requests to protected endpoints.\n\n"
+        "**Note:** Tokens expire after 24 hours. You'll need to login again to get a new token."
+    ),
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
@@ -107,8 +119,9 @@ async def health_check() -> dict:
 
 
 # Include API routers
-from app.api import spells, webhook
+from app.api import auth, spells, webhook
 
+app.include_router(auth.router)
 app.include_router(spells.router)
 app.include_router(webhook.router)
 

@@ -10,9 +10,8 @@ from typing import Optional
 from pydantic import BaseModel, Field
 from sqlalchemy import Column, Integer, String, Text, DateTime
 from sqlalchemy.sql import func
-from sqlalchemy.orm import declarative_base
 
-Base = declarative_base()
+from app.db.database import Base
 
 
 class Spell(Base):
