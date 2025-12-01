@@ -10,9 +10,17 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 import os
+from pathlib import Path
 
 # Get database URL from environment variable or use default
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./grimoire.db")
+
+# Ensure database directory exists for SQLite
+if DATABASE_URL.startswith("sqlite"):
+    # Extract path from URL (format: sqlite+aiosqlite:///./path/to/db.db)
+    db_path = DATABASE_URL.split("///")[-1]
+    db_dir = Path(db_path).parent
+    db_dir.mkdir(parents=True, exist_ok=True)
 
 # Create async engine
 # echo=True logs SQL statements (useful for development)
