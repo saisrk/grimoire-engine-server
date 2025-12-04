@@ -10,9 +10,8 @@ from datetime import timedelta
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
 from app.models.user import User, UserCreate
-from app.services.auth_service import create_user, create_access_token
+from app.services.auth_service import create_user, create_access_token, get_current_user
 
 
 @pytest.mark.asyncio
