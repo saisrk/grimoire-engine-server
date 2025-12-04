@@ -119,11 +119,13 @@ async def health_check() -> dict:
 
 
 # Include API routers
-from app.api import auth, spells, webhook
+from app.api import auth, spells, webhook, repo_configs, webhook_logs
 
 app.include_router(auth.router)
 app.include_router(spells.router)
 app.include_router(webhook.router)
+app.include_router(repo_configs.router)
+app.include_router(webhook_logs.router)
 
 
 if __name__ == "__main__":

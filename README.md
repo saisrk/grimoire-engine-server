@@ -7,6 +7,7 @@ A FastAPI-based backend service that captures GitHub pull request errors and mat
 - **GitHub Webhook Integration**: Automatically receive and process PR events
 - **Spell Management**: Full CRUD API for managing code solution patterns
 - **Error Matching**: Rank and match errors with relevant solution spells
+- **🆕 AI-Powered Auto-Generation**: Automatically create spells using LLMs (OpenAI/Anthropic) when no matches found
 - **Async Architecture**: Non-blocking I/O with FastAPI and SQLAlchemy 2.0
 - **Docker Ready**: Containerized deployment with Docker Compose
 - **Auto Documentation**: Interactive API docs at `/docs`
@@ -15,6 +16,7 @@ A FastAPI-based backend service that captures GitHub pull request errors and mat
 ## 📋 Table of Contents
 
 - [Quick Start](#quick-start)
+- [AI Auto-Generation Setup](#ai-auto-generation-setup)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [API Documentation](#api-documentation)
@@ -68,6 +70,52 @@ uvicorn app.main:app --reload
 
 # Access at http://localhost:8000
 ```
+
+## 🤖 AI Auto-Generation Setup
+
+**NEW!** Grimoire can now automatically generate spells using AI when no matches are found.
+
+### Quick Setup (5 minutes)
+
+1. **Get an API key**:
+   - OpenAI: https://platform.openai.com/api-keys
+   - Anthropic: https://console.anthropic.com/
+
+2. **Configure `.env`**:
+   ```bash
+   AUTO_CREATE_SPELLS=true
+   LLM_PROVIDER=openai
+   LLM_MODEL=gpt-4-turbo
+   OPENAI_API_KEY=sk-your-key-here
+   ```
+
+3. **Run migration**:
+   ```bash
+   alembic upgrade head
+   ```
+
+4. **Test it**:
+   ```bash
+   python test_spell_generation.py
+   ```
+
+5. **Restart app**:
+   ```bash
+   uvicorn app.main:app --reload
+   ```
+
+📚 **Full documentation**: See [SETUP_AUTO_GENERATION.md](SETUP_AUTO_GENERATION.md) and [SPELL_AUTO_GENERATION.md](SPELL_AUTO_GENERATION.md)
+
+### How It Works
+
+When a PR is received and no matching spells exist:
+1. Error context is extracted from the PR
+2. LLM generates human-readable title, description, and solution
+3. New spell is automatically created in the database
+4. Spell is marked as auto-generated with confidence score
+5. Can be reviewed and refined by humans later
+
+**Cost**: ~$0.01-0.02 per spell with GPT-4, ~$0.002 with GPT-3.5
 
 ## 📦 Installation
 
@@ -162,6 +210,20 @@ Add the generated key to your `.env` file as `SECRET_KEY`. Never commit this key
 Once the server is running, visit:
 - **Swagger UI**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
+
+### Comprehensive API Documentation
+
+For detailed API documentation including all endpoints, request/response schemas, error handling, and examples:
+
+📖 **[View Complete API Documentation](API_DOCUMENTATION.md)**
+
+The comprehensive documentation covers:
+- Repository Configuration API (manage webhook integrations)
+- Webhook Logs API (monitor webhook executions)
+- Authentication and authorization
+- Request/response schemas with examples
+- Error handling and status codes
+- Best practices and usage patterns
 
 ### Endpoints Overview
 

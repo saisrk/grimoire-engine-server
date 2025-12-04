@@ -30,6 +30,9 @@ class Spell(Base):
     error_pattern = Column(Text, nullable=False)
     solution_code = Column(Text, nullable=False)
     tags = Column(String(500))  # Comma-separated tags
+    auto_generated = Column(Integer, default=0)  # 0=manual, 1=auto-generated
+    confidence_score = Column(Integer, default=0)  # 0-100 for auto-generated spells
+    human_reviewed = Column(Integer, default=0)  # 0=not reviewed, 1=reviewed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
@@ -47,6 +50,9 @@ class SpellBase(BaseModel):
     error_pattern: str = Field(..., min_length=1)
     solution_code: str = Field(..., min_length=1)
     tags: Optional[str] = None
+    auto_generated: Optional[int] = 0
+    confidence_score: Optional[int] = 0
+    human_reviewed: Optional[int] = 0
 
 
 class SpellCreate(SpellBase):
@@ -62,6 +68,9 @@ class SpellUpdate(SpellBase):
 class SpellResponse(SpellBase):
     """Schema for spell responses (includes DB fields)."""
     id: int
+    auto_generated: int
+    confidence_score: int
+    human_reviewed: int
     created_at: datetime
     updated_at: Optional[datetime] = None
     

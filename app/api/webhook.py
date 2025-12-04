@@ -22,7 +22,9 @@ import hashlib
 import hmac
 import logging
 import os, json
+import time
 from typing import Any, Dict
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.database import get_db
 from app.services.pr_processor import PRProcessor
 from app.services.matcher import MatcherService
+from app.services.spell_generator import SpellGeneratorService
+from app.services.webhook_logger import create_execution_log
 
 router = APIRouter(tags=["webhook"])
 logger = logging.getLogger(__name__)
@@ -269,6 +273,9 @@ async def github_webhook(
         - Errors are logged with full context but do not propagate to response
         - Sensitive data (tokens, secrets) is never logged
     """
+    # Start timer for execution duration tracking
+    start_time = time.time()
+    
     # Get webhook secret from environment
     webhook_secret = os.getenv("GITHUB_WEBHOOK_SECRET")
     
@@ -290,26 +297,6 @@ async def github_webhook(
             detail="Missing signature header"
         )
     
-    # Debug logging to help diagnose signature issues
-    # Never log sensitive data (tokens, secrets) in error messages
-    computed_hash = hmac.new(
-        webhook_secret.encode("utf-8"),
-        body,
-        hashlib.sha256
-    ).hexdigest()
-    expected_hash = x_hub_signature_256[7:] if x_hub_signature_256.startswith("sha256=") else x_hub_signature_256
-    
-    logger.debug(
-        "Signature validation details",
-        extra={
-            "body_length": len(body),
-            "body_preview": body[:100].decode("utf-8", errors="replace"),
-            "expected_hash": expected_hash[:20] + "...",  # Only log partial hash, not full secret
-            "computed_hash": computed_hash[:20] + "...",  # Only log partial hash, not full secret
-            "hashes_match": hmac.compare_digest(computed_hash, expected_hash)
-        }
-    )
-    
     # if not validate_signature(body, x_hub_signature_256, webhook_secret):
     #     logger.warning(
     #         "Invalid webhook signature received",
@@ -327,12 +314,28 @@ async def github_webhook(
     
     # Parse JSON payload from the raw body
     try:
-        payload = json.loads(body.decode("utf-8"))
-    except Exception as e:
-        logger.error(f"Failed to parse webhook payload: {e}")
+        body_str = body.decode("utf-8")
+    except UnicodeDecodeError as e:
+        logger.error(f"Failed to decode webhook body as UTF-8: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid JSON payload"
+            detail="Invalid UTF-8 encoding in request body"
+        )
+    
+    # Check if body is URL-encoded form data (starts with "payload=")
+    if body_str.startswith("payload="):
+        # Extract and decode the URL-encoded JSON payload
+        encoded_payload = body_str[8:]  # Remove "payload=" prefix
+        body_str = unquote(encoded_payload)
+    
+    # Parse as JSON
+    try:
+        payload = json.loads(body_str)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse webhook payload as JSON: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid JSON payload: {str(e)}"
         )
     
     # Log successful webhook receipt
@@ -350,9 +353,11 @@ async def github_webhook(
     pr_processing_result = None
     # Set matched_spells to empty list by default
     matched_spells = []
+    # Track if spell was auto-generated
+    auto_generated_spell_id = None
     
     # Process pull_request events
-    if x_github_event == "pull_request":
+    if x_github_event in ['push', 'pull_request']:
         # Extract PR metadata for logging (used throughout error handling)
         repo_name = payload.get("repository", {}).get("full_name", "unknown")
         pr_number = payload.get("pull_request", {}).get("number", 0)
@@ -410,6 +415,50 @@ async def github_webhook(
                         }
                     )
                     
+                    # If no spells matched, try to auto-generate one
+                    if not matched_spells:
+                        try:
+                            logger.info(
+                                f"No spells matched for {repo_name} PR #{pr_number}, attempting auto-generation"
+                            )
+                            
+                            # Initialize Spell Generator Service
+                            spell_generator = SpellGeneratorService(db)
+                            
+                            # Generate new spell
+                            auto_generated_spell_id = await spell_generator.generate_spell(
+                                error_payload,
+                                pr_context=pr_processing_result
+                            )
+                            
+                            if auto_generated_spell_id:
+                                # Add auto-generated spell to matched list
+                                matched_spells = [auto_generated_spell_id]
+                                
+                                logger.info(
+                                    f"Auto-generated spell {auto_generated_spell_id} for {repo_name} PR #{pr_number}",
+                                    extra={
+                                        "spell_id": auto_generated_spell_id,
+                                        "repo": pr_processing_result.get("repo"),
+                                        "pr_number": pr_processing_result.get("pr_number")
+                                    }
+                                )
+                            else:
+                                logger.info(
+                                    f"Auto-generation skipped or failed for {repo_name} PR #{pr_number}"
+                                )
+                                
+                        except Exception as e:
+                            logger.error(
+                                f"Error in spell generator for {repo_name} PR #{pr_number}: {str(e)}",
+                                exc_info=True,
+                                extra={
+                                    "repo": pr_processing_result.get("repo"),
+                                    "pr_number": pr_processing_result.get("pr_number"),
+                                    "error_type": type(e).__name__
+                                }
+                            )
+                    
                 except Exception as e:
                     # Wrap matcher service call in try-except with specific exception handling
                     # Log all exceptions with full stack trace using exc_info=True
@@ -445,16 +494,73 @@ async def github_webhook(
             # Continue to return success to prevent GitHub retries
             # Ensure webhook always returns HTTP 200 even on errors
     
+    # Create webhook execution log before returning
+    try:
+        # Calculate execution duration in milliseconds
+        execution_duration_ms = int((time.time() - start_time) * 1000)
+        
+        # Extract repository name and PR number for logging
+        repo_name = payload.get("repository", {}).get("full_name", "unknown")
+        pr_number = None
+        if x_github_event in ['pull_request', 'push']:
+            pr_number = payload.get("pull_request", {}).get("number")
+        
+        # Extract error message if present
+        error_message = None
+        if pr_processing_result and pr_processing_result.get("status") == "error":
+            error_message = pr_processing_result.get("error")
+        
+        # Create execution log with all captured data
+        await create_execution_log(
+            db=db,
+            repo_name=repo_name,
+            event_type=x_github_event,
+            pr_number=pr_number,
+            action=payload.get("action"),
+            matched_spell_ids=matched_spells if matched_spells else None,
+            auto_generated_spell_id=auto_generated_spell_id,
+            error_message=error_message,
+            pr_processing_result=pr_processing_result,
+            execution_duration_ms=execution_duration_ms
+        )
+        
+        logger.debug(
+            f"Webhook execution log created for {repo_name}",
+            extra={
+                "repo_name": repo_name,
+                "pr_number": pr_number,
+                "execution_duration_ms": execution_duration_ms
+            }
+        )
+        
+    except Exception as e:
+        # Never fail webhook due to logging errors
+        # Log the logging failure with full context
+        logger.error(
+            f"Failed to create webhook execution log: {str(e)}",
+            exc_info=True,
+            extra={
+                "repo_name": payload.get("repository", {}).get("full_name", "unknown"),
+                "pr_number": payload.get("pull_request", {}).get("number") if x_github_event in ['pull_request', 'push'] else None,
+                "event_type": x_github_event,
+                "action": payload.get("action"),
+                "error_type": type(e).__name__
+            }
+        )
+        # Continue to return success response
+    
     # Return enhanced response with PR processing and matched spells
     # Ensure response is always a valid dictionary with all required fields
     # Maintain existing status, event, and action fields
     # pr_processing includes repo, pr_number, files_changed, status when available
     # pr_processing is None for non-pull_request events
     # matched_spells is empty list if matching fails
+    # auto_generated_spell_id indicates if a spell was created
     return {
         "status": "success",
         "event": x_github_event,
         "action": payload.get("action"),
         "pr_processing": pr_processing_result,
-        "matched_spells": matched_spells
+        "matched_spells": matched_spells,
+        "auto_generated_spell_id": auto_generated_spell_id
     }

@@ -13,6 +13,8 @@ from app.main import app
 # Import models to register them with Base metadata
 from app.models.spell import Spell
 from app.models.user import User
+from app.models.repository_config import RepositoryConfig
+from app.models.webhook_execution_log import WebhookExecutionLog
 from app.services.auth_service import create_access_token, hash_password
 
 
@@ -35,6 +37,10 @@ test_session_maker = async_sessionmaker(
 async def override_get_db():
     """Override database dependency for testing."""
     async with test_session_maker() as session:
+        # Enable foreign keys for SQLite (required for cascade delete)
+        from sqlalchemy import text
+        await session.execute(text("PRAGMA foreign_keys=ON"))
+        await session.commit()
         yield session
 
 
