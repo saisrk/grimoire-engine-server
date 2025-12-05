@@ -16,6 +16,22 @@ from sqlalchemy.sql import func
 from app.db.database import Base
 
 
+class MatchedSpellDetail(BaseModel):
+    """
+    Schema for matched spell details in webhook execution logs.
+    
+    Provides essential information about a spell that matched a webhook event.
+    """
+    id: int = Field(..., description="Spell ID")
+    title: str = Field(..., description="Spell title")
+    description: str = Field(..., description="Spell description")
+    error_type: str = Field(..., description="Error type this spell addresses")
+    auto_generated: int = Field(..., description="Whether spell was auto-generated (0=manual, 1=auto)")
+    confidence_score: int = Field(..., description="Confidence score (0-100) for auto-generated spells")
+    
+    model_config = {"from_attributes": True}
+
+
 class WebhookExecutionLog(Base):
     """
     SQLAlchemy model for a webhook execution log.
@@ -125,6 +141,10 @@ class WebhookExecutionLogResponse(BaseModel):
     matched_spell_ids: List[int] = Field(
         default_factory=list,
         description="List of spell IDs that matched this webhook event"
+    )
+    matched_spells: List[MatchedSpellDetail] = Field(
+        default_factory=list,
+        description="Detailed information about spells that matched this webhook event"
     )
     auto_generated_spell_id: Optional[int] = Field(
         None,

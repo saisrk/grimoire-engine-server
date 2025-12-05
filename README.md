@@ -169,6 +169,19 @@ API_PORT=8000                    # Port to run the server
 
 # CORS Configuration
 CORS_ORIGINS=http://localhost:3000,http://localhost:8000  # Allowed origins (comma-separated)
+
+# LLM Configuration (for spell generation and patch generation)
+AUTO_CREATE_SPELLS=false                                 # Enable automatic spell creation
+LLM_PROVIDER=openai                                      # LLM provider: openai or anthropic
+LLM_MODEL=gpt-4-turbo                                    # Model to use
+OPENAI_API_KEY=your_openai_key_here                      # OpenAI API key
+ANTHROPIC_API_KEY=your_anthropic_key_here                # Anthropic API key
+LLM_TIMEOUT=30                                           # LLM request timeout in seconds
+LLM_MAX_TOKENS=1000                                      # Maximum tokens for LLM response
+
+# Patch Generation Configuration (for spell application)
+PATCH_GENERATION_TIMEOUT=30                              # Timeout for patch generation requests (seconds)
+PATCH_MAX_FILES_DEFAULT=3                                # Default maximum files to modify in a patch
 ```
 
 ### GitHub Webhook Setup
@@ -202,6 +215,41 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
 Add the generated key to your `.env` file as `SECRET_KEY`. Never commit this key to version control.
+
+### Patch Generation Configuration
+
+Configure settings for the spell application feature that generates context-aware patches:
+
+#### PATCH_GENERATION_TIMEOUT
+
+Timeout in seconds for LLM patch generation requests. Default: `30`
+
+```bash
+PATCH_GENERATION_TIMEOUT=30
+```
+
+This controls how long the system will wait for the LLM to generate a patch before timing out. Increase this value if you're experiencing frequent timeouts with complex patches, or decrease it for faster failure feedback.
+
+**Recommended values:**
+- Development: 30 seconds
+- Production: 30-60 seconds (depending on LLM provider performance)
+
+#### PATCH_MAX_FILES_DEFAULT
+
+Default maximum number of files that can be modified in a generated patch. Default: `3`
+
+```bash
+PATCH_MAX_FILES_DEFAULT=3
+```
+
+This constraint helps ensure patches remain focused and reviewable. The LLM will be instructed to limit changes to this many files. Users can override this on a per-request basis through the API.
+
+**Recommended values:**
+- Conservative: 1-3 files (easier to review, more focused changes)
+- Moderate: 3-5 files (balanced approach)
+- Permissive: 5-10 files (for complex refactorings)
+
+**Note:** These settings work in conjunction with the LLM configuration. Ensure you have `LLM_PROVIDER`, `LLM_MODEL`, and the appropriate API key configured for patch generation to work.
 
 ## 📚 API Documentation
 
@@ -563,6 +611,143 @@ Delete a spell by ID.
   "detail": "Spell with id 999 not found"
 }
 ```
+
+### Spell Application API
+
+The Spell Application API enables developers to generate context-aware code patches by adapting canonical spell solutions to their specific failing code. The system uses LLM-based prompt engineering to transform a spell's incantation into a git unified diff patch tailored to the user's repository, language, version, and error context.
+
+#### Apply Spell
+
+```http
+POST /api/spells/{spell_id}/apply
+```
+
+Apply a spell to generate a context-aware patch for failing code.
+
+Takes a spell's canonical solution (incantation) and adapts it to the specific failing code context using an LLM. Returns a git unified diff patch that can be applied to the repository.
+
+**Request Body:**
+```json
+{
+  "failing_context": {
+    "repository": "myorg/myrepo",
+    "commit_sha": "abc123def456",
+    "language": "python",
+    "version": "3.11",
+    "failing_test": "test_user_login",
+    "stack_trace": "Traceback (most recent call last):\n  File 'test.py', line 10\n    assert user is not None\nAssertionError"
+  },
+  "adaptation_constraints": {
+    "max_files": 3,
+    "excluded_patterns": ["package.json", "*.lock"],
+    "preserve_style": true
+  }
+}
+```
+
+**Request Fields:**
+
+`failing_context` (required):
+- `repository` (required): Repository name in format 'owner/repo'
+- `commit_sha` (required): Git commit SHA where the patch should be applied (7-40 characters)
+- `language` (optional): Programming language (e.g., 'python', 'javascript')
+- `version` (optional): Language or framework version (e.g., '3.11', '18.0')
+- `failing_test` (optional): Name of the failing test case
+- `stack_trace` (optional): Full stack trace or error message
+
+`adaptation_constraints` (optional):
+- `max_files` (optional): Maximum number of files to modify (1-10, default: 3)
+- `excluded_patterns` (optional): List of file patterns that should not be modified (default: ["package.json", "*.lock"])
+- `preserve_style` (optional): Whether to preserve existing coding style (default: true)
+
+**Response (200 OK):**
+```json
+{
+  "application_id": 1,
+  "patch": "diff --git a/app/auth.py b/app/auth.py\nindex 1234567..abcdefg 100644\n--- a/app/auth.py\n+++ b/app/auth.py\n@@ -10,6 +10,8 @@\n def login(user):\n+    if user is None:\n+        return None\n     return user.token",
+  "files_touched": ["app/auth.py"],
+  "rationale": "Added null check before accessing user object to prevent AttributeError",
+  "created_at": "2025-12-05T10:30:00Z"
+}
+```
+
+**HTTP Status Codes:**
+- `200 OK`: Patch generated successfully
+- `404 Not Found`: Spell with the given ID does not exist
+- `422 Unprocessable Entity`: Invalid request format, patch validation failed, or constraint violations (e.g., too many files modified)
+- `500 Internal Server Error`: LLM configuration error (missing or invalid API key)
+- `502 Bad Gateway`: LLM API returned an error or invalid response
+- `504 Gateway Timeout`: LLM request exceeded the 30-second timeout
+
+**Error Response Examples:**
+
+404 Not Found:
+```json
+{
+  "detail": "Spell with id 999 not found"
+}
+```
+
+422 Unprocessable Entity:
+```json
+{
+  "detail": "Patch validation failed: number of files (5) exceeds maximum allowed (3)"
+}
+```
+
+504 Gateway Timeout:
+```json
+{
+  "detail": "Patch generation request timed out"
+}
+```
+
+#### List Spell Applications
+
+```http
+GET /api/spells/{spell_id}/applications?skip=0&limit=50
+```
+
+List all applications of a specific spell with pagination.
+
+Returns the history of all times this spell was applied to generate patches, ordered by most recent first. Each summary includes the repository, commit SHA, files touched, and timestamp.
+
+**Query Parameters:**
+- `skip` (optional): Number of records to skip for pagination (default: 0)
+- `limit` (optional): Maximum number of records to return (default: 50)
+
+**Response (200 OK):**
+```json
+[
+  {
+    "id": 5,
+    "spell_id": 1,
+    "repository": "myorg/myrepo",
+    "commit_sha": "abc123def456",
+    "files_touched": ["app/auth.py", "app/models/user.py"],
+    "created_at": "2025-12-05T10:30:00Z"
+  },
+  {
+    "id": 4,
+    "spell_id": 1,
+    "repository": "anotherorg/anotherrepo",
+    "commit_sha": "def789ghi012",
+    "files_touched": ["src/login.py"],
+    "created_at": "2025-12-04T15:20:00Z"
+  }
+]
+```
+
+**Empty Response (200 OK):**
+```json
+[]
+```
+
+**Use Cases:**
+- Track how a spell has been used across different repositories
+- Monitor patch generation patterns and success rates
+- Review historical applications for debugging and improvement
+- Display application history on spell detail pages
 
 ## 🛠️ Development
 

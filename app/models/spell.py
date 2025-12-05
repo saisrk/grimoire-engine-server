@@ -5,10 +5,11 @@ A spell represents a reusable code solution or pattern that can fix specific err
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Any
 
 from pydantic import BaseModel, Field
 from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from app.db.database import Base
@@ -35,6 +36,9 @@ class Spell(Base):
     human_reviewed = Column(Integer, default=0)  # 0=not reviewed, 1=reviewed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationship
+    applications = relationship("SpellApplication", back_populates="spell")
     
     # Extension point: Add vector embedding column when integrating vector DB
     # embedding = Column(Vector(1536))  # For OpenAI ada-002 embeddings
@@ -73,5 +77,6 @@ class SpellResponse(SpellBase):
     human_reviewed: int
     created_at: datetime
     updated_at: Optional[datetime] = None
+    applications: List[Any] = Field(default_factory=list)
     
     model_config = {"from_attributes": True}  # SQLAlchemy 2.0 compatibility

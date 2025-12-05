@@ -12,6 +12,15 @@ from app.models.webhook_execution_log import (
     WebhookExecutionLog,
     WebhookExecutionLogResponse,
 )
+from app.models.spell_application import (
+    SpellApplication,
+    FailingContext,
+    AdaptationConstraints,
+    PatchResult,
+    SpellApplicationRequest,
+    SpellApplicationResponse,
+    SpellApplicationSummary,
+)
 
 __all__ = [
     "Spell",
@@ -26,4 +35,11 @@ __all__ = [
     "RepositoryConfigResponse",
     "WebhookExecutionLog",
     "WebhookExecutionLogResponse",
+    "SpellApplication",
+    "FailingContext",
+    "AdaptationConstraints",
+    "PatchResult",
+    "SpellApplicationRequest",
+    "SpellApplicationResponse",
+    "SpellApplicationSummary",
 ]

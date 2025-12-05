@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.spell import Spell
-from app.services.llm_service import LLMService
+from app.services.llm_service import get_llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class SpellGeneratorService:
     def __init__(
         self,
         db: AsyncSession,
-        llm_service: Optional[LLMService] = None,
+        llm_service: Optional[Any] = None,
         auto_create_enabled: Optional[bool] = None
     ):
         """
@@ -48,7 +48,7 @@ class SpellGeneratorService:
             auto_create_enabled: Override for auto-creation flag. Uses env var if None.
         """
         self.db = db
-        self.llm_service = llm_service or LLMService()
+        self.llm_service = llm_service or get_llm_service()
         
         # Check if auto-creation is enabled
         if auto_create_enabled is not None:
