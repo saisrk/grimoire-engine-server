@@ -13,6 +13,12 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.error_handlers import (
+    raise_repository_not_found,
+    handle_database_constraint_error,
+    log_constraint_violation_attempt
+)
+
 from app.db.database import get_db
 from app.models.repository_config import (
     RepositoryConfig,
@@ -26,6 +32,7 @@ from app.models.webhook_execution_log import (
 )
 from app.models.user import User
 from app.services.auth_service import get_current_user
+from app.services.repository_access_manager import RepositoryAccessManager
 
 
 router = APIRouter(
@@ -59,10 +66,14 @@ router = APIRouter(
                         "repo_name": "octocat/Hello-World",
                         "webhook_url": "https://grimoire.example.com/webhook/github",
                         "enabled": True,
+                        "user_id": 1,
                         "created_at": "2025-12-05T10:00:00Z",
                         "updated_at": None,
                         "webhook_count": 0,
-                        "last_webhook_at": None
+                        "last_webhook_at": None,
+                        "spell_count": 0,
+                        "auto_generated_spell_count": 0,
+                        "manual_spell_count": 0
                     }
                 }
             }
@@ -103,6 +114,7 @@ async def create_repository_config(
     
     Registers a GitHub repository for webhook integration. The repository name
     must follow the format "owner/repo" (e.g., "octocat/Hello-World").
+    The repository will be associated with the authenticated user.
     
     **Requirements:**
     - Repository name must match format: owner/repo
@@ -112,11 +124,12 @@ async def create_repository_config(
     **Authentication required:** Include Bearer token in Authorization header.
     """
     try:
-        # Create new repository config
+        # Create new repository config associated with authenticated user
         repo_config = RepositoryConfig(
             repo_name=config_data.repo_name,
             webhook_url=config_data.webhook_url,
-            enabled=config_data.enabled
+            enabled=config_data.enabled,
+            user_id=current_user.id
         )
         
         db.add(repo_config)
@@ -127,16 +140,24 @@ async def create_repository_config(
         response = RepositoryConfigResponse.model_validate(repo_config)
         response.webhook_count = 0
         response.last_webhook_at = None
+        response.spell_count = 0
+        response.auto_generated_spell_count = 0
+        response.manual_spell_count = 0
+        response.spell_application_count = 0
+        response.last_spell_created_at = None
+        response.last_application_at = None
         
         return response
         
-    except IntegrityError:
-        # Repository name already exists
+    except IntegrityError as e:
+        # Repository name already exists or other constraint violation
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Repository already configured"
+        log_constraint_violation_attempt(
+            "repository_creation",
+            user_id=current_user.id,
+            error_details=str(e)
         )
+        handle_database_constraint_error(e, "repository configuration creation")
 
 
 @router.get(
@@ -154,10 +175,14 @@ async def create_repository_config(
                             "repo_name": "octocat/Hello-World",
                             "webhook_url": "https://grimoire.example.com/webhook/github",
                             "enabled": True,
+                            "user_id": 1,
                             "created_at": "2025-12-05T10:00:00Z",
                             "updated_at": "2025-12-05T12:00:00Z",
                             "webhook_count": 15,
-                            "last_webhook_at": "2025-12-05T11:45:00Z"
+                            "last_webhook_at": "2025-12-05T11:45:00Z",
+                            "spell_count": 8,
+                            "auto_generated_spell_count": 5,
+                            "manual_spell_count": 3
                         }
                     ]
                 }
@@ -172,22 +197,28 @@ async def list_repository_configs(
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of records to return")
 ) -> List[RepositoryConfigResponse]:
     """
-    List all repository configurations with pagination.
+    List repository configurations owned by the authenticated user.
     
-    Returns all configured repositories ordered by creation date (newest first).
-    Includes computed fields for webhook count and last webhook execution time.
+    Returns only repositories configured by the authenticated user, ordered by 
+    creation date (newest first). Includes computed fields for webhook count 
+    and last webhook execution time.
     
     **Authentication required:** Include Bearer token in Authorization header.
     """
-    # Query repository configs ordered by created_at descending
+    # Query repository configs filtered by user ownership
     stmt = (
         select(RepositoryConfig)
+        .where(RepositoryConfig.user_id == current_user.id)
         .order_by(RepositoryConfig.created_at.desc())
         .offset(skip)
         .limit(limit)
     )
     result = await db.execute(stmt)
     repo_configs = result.scalars().all()
+    
+    # Get repository statistics for all user repositories
+    access_manager = RepositoryAccessManager()
+    repo_stats = await access_manager.get_repository_statistics(current_user.id, db)
     
     # Build responses with computed fields
     responses = []
@@ -208,10 +239,25 @@ async def list_repository_configs(
         last_webhook_result = await db.execute(last_webhook_stmt)
         last_webhook_at = last_webhook_result.scalar()
         
+        # Get spell statistics for this repository
+        stats = repo_stats.get(config.id)
+        spell_count = stats.total_spells if stats else 0
+        auto_generated_count = stats.auto_generated_spells if stats else 0
+        manual_count = stats.manual_spells if stats else 0
+        spell_application_count = stats.spell_applications if stats else 0
+        last_spell_created_at = stats.last_spell_created if stats else None
+        last_application_at = stats.last_application if stats else None
+        
         # Build response
         response = RepositoryConfigResponse.model_validate(config)
         response.webhook_count = webhook_count
         response.last_webhook_at = last_webhook_at
+        response.spell_count = spell_count
+        response.auto_generated_spell_count = auto_generated_count
+        response.manual_spell_count = manual_count
+        response.spell_application_count = spell_application_count
+        response.last_spell_created_at = last_spell_created_at
+        response.last_application_at = last_application_at
         
         responses.append(response)
     
@@ -232,10 +278,14 @@ async def list_repository_configs(
                         "repo_name": "octocat/Hello-World",
                         "webhook_url": "https://grimoire.example.com/webhook/github",
                         "enabled": True,
+                        "user_id": 1,
                         "created_at": "2025-12-05T10:00:00Z",
                         "updated_at": "2025-12-05T12:00:00Z",
                         "webhook_count": 15,
-                        "last_webhook_at": "2025-12-05T11:45:00Z"
+                        "last_webhook_at": "2025-12-05T11:45:00Z",
+                        "spell_count": 8,
+                        "auto_generated_spell_count": 5,
+                        "manual_spell_count": 3
                     }
                 }
             }
@@ -258,21 +308,22 @@ async def get_repository_config(
     """
     Get a specific repository configuration by ID.
     
-    Returns detailed information about a repository configuration,
-    including webhook count and last execution time.
+    Returns detailed information about a repository configuration owned by
+    the authenticated user, including webhook count, spell statistics, and 
+    last execution time.
     
     **Authentication required:** Include Bearer token in Authorization header.
     """
-    # Query repository config by ID
-    stmt = select(RepositoryConfig).where(RepositoryConfig.id == config_id)
+    # Query repository config by ID and verify ownership
+    stmt = select(RepositoryConfig).where(
+        RepositoryConfig.id == config_id,
+        RepositoryConfig.user_id == current_user.id
+    )
     result = await db.execute(stmt)
     repo_config = result.scalar_one_or_none()
     
     if repo_config is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Repository configuration not found"
-        )
+        raise_repository_not_found(config_id)
     
     # Count webhooks for this repo
     count_stmt = (
@@ -290,10 +341,27 @@ async def get_repository_config(
     last_webhook_result = await db.execute(last_webhook_stmt)
     last_webhook_at = last_webhook_result.scalar()
     
+    # Get spell statistics for this repository
+    access_manager = RepositoryAccessManager()
+    repo_stats = await access_manager.get_repository_statistics(current_user.id, db)
+    stats = repo_stats.get(repo_config.id)
+    spell_count = stats.total_spells if stats else 0
+    auto_generated_count = stats.auto_generated_spells if stats else 0
+    manual_count = stats.manual_spells if stats else 0
+    spell_application_count = stats.spell_applications if stats else 0
+    last_spell_created_at = stats.last_spell_created if stats else None
+    last_application_at = stats.last_application if stats else None
+    
     # Build response
     response = RepositoryConfigResponse.model_validate(repo_config)
     response.webhook_count = webhook_count
     response.last_webhook_at = last_webhook_at
+    response.spell_count = spell_count
+    response.auto_generated_spell_count = auto_generated_count
+    response.manual_spell_count = manual_count
+    response.spell_application_count = spell_application_count
+    response.last_spell_created_at = last_spell_created_at
+    response.last_application_at = last_application_at
     
     return response
 
@@ -312,10 +380,14 @@ async def get_repository_config(
                         "repo_name": "octocat/Hello-World",
                         "webhook_url": "https://grimoire.example.com/webhook/github",
                         "enabled": False,
+                        "user_id": 1,
                         "created_at": "2025-12-05T10:00:00Z",
                         "updated_at": "2025-12-05T14:00:00Z",
                         "webhook_count": 15,
-                        "last_webhook_at": "2025-12-05T11:45:00Z"
+                        "last_webhook_at": "2025-12-05T11:45:00Z",
+                        "spell_count": 8,
+                        "auto_generated_spell_count": 5,
+                        "manual_spell_count": 3
                     }
                 }
             }
@@ -339,30 +411,41 @@ async def update_repository_config(
     """
     Update a repository configuration.
     
-    Allows updating the webhook URL and enabled status. The repository name
-    cannot be changed. The updated_at timestamp is automatically updated.
+    Allows updating the webhook URL and enabled status for repositories owned
+    by the authenticated user. The repository name cannot be changed. 
+    The updated_at timestamp is automatically updated.
     
     **Authentication required:** Include Bearer token in Authorization header.
     """
-    # Query repository config by ID
-    stmt = select(RepositoryConfig).where(RepositoryConfig.id == config_id)
+    # Query repository config by ID and verify ownership
+    stmt = select(RepositoryConfig).where(
+        RepositoryConfig.id == config_id,
+        RepositoryConfig.user_id == current_user.id
+    )
     result = await db.execute(stmt)
     repo_config = result.scalar_one_or_none()
     
     if repo_config is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Repository configuration not found"
-        )
+        raise_repository_not_found(config_id)
     
     # Update fields if provided
-    if update_data.webhook_url is not None:
-        repo_config.webhook_url = update_data.webhook_url
-    if update_data.enabled is not None:
-        repo_config.enabled = update_data.enabled
-    
-    await db.commit()
-    await db.refresh(repo_config)
+    try:
+        if update_data.webhook_url is not None:
+            repo_config.webhook_url = update_data.webhook_url
+        if update_data.enabled is not None:
+            repo_config.enabled = update_data.enabled
+        
+        await db.commit()
+        await db.refresh(repo_config)
+    except IntegrityError as e:
+        await db.rollback()
+        log_constraint_violation_attempt(
+            "repository_update",
+            user_id=current_user.id,
+            repository_id=config_id,
+            error_details=str(e)
+        )
+        handle_database_constraint_error(e, "repository configuration update")
     
     # Count webhooks for this repo
     count_stmt = (
@@ -380,10 +463,27 @@ async def update_repository_config(
     last_webhook_result = await db.execute(last_webhook_stmt)
     last_webhook_at = last_webhook_result.scalar()
     
+    # Get spell statistics for this repository
+    access_manager = RepositoryAccessManager()
+    repo_stats = await access_manager.get_repository_statistics(current_user.id, db)
+    stats = repo_stats.get(repo_config.id)
+    spell_count = stats.total_spells if stats else 0
+    auto_generated_count = stats.auto_generated_spells if stats else 0
+    manual_count = stats.manual_spells if stats else 0
+    spell_application_count = stats.spell_applications if stats else 0
+    last_spell_created_at = stats.last_spell_created if stats else None
+    last_application_at = stats.last_application if stats else None
+    
     # Build response
     response = RepositoryConfigResponse.model_validate(repo_config)
     response.webhook_count = webhook_count
     response.last_webhook_at = last_webhook_at
+    response.spell_count = spell_count
+    response.auto_generated_spell_count = auto_generated_count
+    response.manual_spell_count = manual_count
+    response.spell_application_count = spell_application_count
+    response.last_spell_created_at = last_spell_created_at
+    response.last_application_at = last_application_at
     
     return response
 
@@ -419,27 +519,38 @@ async def delete_repository_config(
     """
     Delete a repository configuration.
     
-    Removes the repository configuration and all associated webhook execution logs
-    (cascade delete). This operation cannot be undone.
+    Removes the repository configuration owned by the authenticated user and 
+    all associated webhook execution logs (cascade delete). This operation 
+    cannot be undone.
     
     **Authentication required:** Include Bearer token in Authorization header.
     """
-    # Query repository config by ID
-    stmt = select(RepositoryConfig).where(RepositoryConfig.id == config_id)
+    # Query repository config by ID and verify ownership
+    stmt = select(RepositoryConfig).where(
+        RepositoryConfig.id == config_id,
+        RepositoryConfig.user_id == current_user.id
+    )
     result = await db.execute(stmt)
     repo_config = result.scalar_one_or_none()
     
     if repo_config is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Repository configuration not found"
-        )
+        raise_repository_not_found(config_id)
     
     # Delete the repository config (cascade will delete associated logs)
-    await db.delete(repo_config)
-    await db.commit()
-    
-    return {"message": "Repository configuration deleted successfully"}
+    try:
+        await db.delete(repo_config)
+        await db.commit()
+        
+        return {"message": "Repository configuration deleted successfully"}
+    except IntegrityError as e:
+        await db.rollback()
+        log_constraint_violation_attempt(
+            "repository_deletion",
+            user_id=current_user.id,
+            repository_id=config_id,
+            error_details=str(e)
+        )
+        handle_database_constraint_error(e, "repository configuration deletion")
 
 
 
@@ -566,21 +677,22 @@ async def get_repository_logs(
     """
     Get all webhook execution logs for a specific repository.
     
-    Returns logs for the specified repository ordered by execution time (newest first).
-    Returns an empty list if the repository has no logs.
+    Returns logs for the specified repository owned by the authenticated user,
+    ordered by execution time (newest first). Returns an empty list if the 
+    repository has no logs.
     
     **Authentication required:** Include Bearer token in Authorization header.
     """
-    # Verify repository config exists
-    config_stmt = select(RepositoryConfig).where(RepositoryConfig.id == config_id)
+    # Verify repository config exists and user owns it
+    config_stmt = select(RepositoryConfig).where(
+        RepositoryConfig.id == config_id,
+        RepositoryConfig.user_id == current_user.id
+    )
     config_result = await db.execute(config_stmt)
     repo_config = config_result.scalar_one_or_none()
     
     if repo_config is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Repository configuration not found"
-        )
+        raise_repository_not_found(config_id)
     
     # Query logs for this repository
     logs_stmt = (

@@ -12,15 +12,31 @@ This module provides REST API endpoints for managing spells:
 
 import json
 import logging
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Optional, Annotated
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.exc import IntegrityError
 
 from app.utils.logging import safe_log_data
+from app.utils.error_handlers import (
+    raise_repository_not_found,
+    raise_spell_not_found,
+    raise_repository_access_denied,
+    raise_spell_access_denied,
+    raise_validation_error,
+    handle_database_constraint_error,
+    log_constraint_violation_attempt,
+    validate_repository_exists_and_accessible,
+    validate_spell_exists_and_accessible
+)
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
 from app.db.database import get_db
+from app.models.user import User
+from app.models.repository_config import RepositoryConfig
+from app.services.auth_service import get_current_user
+from app.services.repository_access_manager import RepositoryAccessManager
 from app.models.spell import Spell, SpellCreate, SpellUpdate, SpellResponse
 from app.models.spell_application import (
     SpellApplication,
@@ -38,57 +54,109 @@ logger = logging.getLogger(__name__)
 
 @router.get("", response_model=List[SpellResponse])
 async def list_spells(
-    skip: int = 0,
-    limit: int = 100,
-    db: AsyncSession = Depends(get_db)
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of records to return"),
+    repository_id: Optional[int] = Query(None, description="Filter by repository ID"),
+    search: Optional[str] = Query(None, description="Search in spell titles and descriptions")
 ) -> List[SpellResponse]:
     """
-    List all spells with pagination.
+    List spells from repositories accessible to the authenticated user.
+    
+    Returns spells from repositories owned by the user, ordered by creation date 
+    (newest first). Supports filtering by repository and text search across 
+    spell titles and descriptions.
+    
+    **Authentication required:** Include Bearer token in Authorization header.
     
     Args:
         skip: Number of records to skip (default: 0)
         limit: Maximum number of records to return (default: 100)
+        repository_id: Filter by specific repository ID (optional)
+        search: Search term for titles and descriptions (optional)
         db: Database session dependency
+        current_user: Authenticated user
         
     Returns:
-        List of spell objects with metadata
+        List of spell objects from accessible repositories
         
     Example:
-        GET /api/spells?skip=0&limit=10
+        GET /api/spells?skip=0&limit=10&repository_id=1&search=undefined
         Response: [{"id": 1, "title": "Fix undefined variable", ...}, ...]
     """
-    result = await db.execute(
-        select(Spell)
-        .offset(skip)
-        .limit(limit)
+    # Use RepositoryAccessManager to filter spells by accessible repositories
+    access_manager = RepositoryAccessManager()
+    
+    # Build base query
+    query = select(Spell).options(
+        selectinload(Spell.repository)
     )
+    
+    # Filter by accessible repositories
+    query = await access_manager.filter_spells_by_access(query, current_user.id, db)
+    
+    # Apply additional filters
+    if repository_id:
+        # Verify user has access to this specific repository
+        has_access = await access_manager.validate_repository_access(
+            current_user.id, repository_id, db
+        )
+        if not has_access:
+            raise_repository_not_found(repository_id)
+        query = query.where(Spell.repository_id == repository_id)
+    
+    if search:
+        search_term = f"%{search}%"
+        query = query.where(
+            or_(
+                Spell.title.ilike(search_term),
+                Spell.description.ilike(search_term)
+            )
+        )
+    
+    # Apply ordering and pagination
+    query = query.order_by(Spell.created_at.desc()).offset(skip).limit(limit)
+    
+    # Execute query
+    result = await db.execute(query)
     spells = result.scalars().all()
-    return spells
+    
+    return [SpellResponse.model_validate(spell) for spell in spells]
 
 
 @router.get("/{spell_id}", response_model=SpellResponse)
 async def get_spell(
     spell_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)]
 ) -> dict:
     """
     Get a single spell by ID.
     
+    Returns detailed information about a spell including its repository
+    configuration and current status. Only accessible if the user owns
+    the repository containing the spell.
+    
+    **Authentication required:** Include Bearer token in Authorization header.
+    
     Args:
         spell_id: ID of the spell to retrieve
         db: Database session dependency
+        current_user: Authenticated user
         
     Returns:
         Spell object with all fields including applications list
         
     Raises:
-        HTTPException: 404 if spell not found
+        HTTPException: 404 if spell not found or not accessible
         
     Example:
         GET /api/spells/1
         Response: {
             "id": 1, 
             "title": "Fix undefined variable",
+            "repository_id": 1,
             "applications": [
                 {
                     "id": 1,
@@ -109,11 +177,16 @@ async def get_spell(
     )
     spell = result.scalar_one_or_none()
     
-    if spell is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Spell with id {spell_id} not found"
-        )
+    # Verify repository access using RepositoryAccessManager
+    access_manager = RepositoryAccessManager()
+    has_access = await access_manager.validate_spell_repository_access(
+        current_user.id, spell_id, db
+    )
+    
+    # Use standardized error handling
+    validate_spell_exists_and_accessible(
+        spell_id, current_user.id, spell is not None, has_access
+    )
     
     # Convert applications to SpellApplicationSummary with JSON parsing
     from app.models.spell_application import SpellApplicationSummary
@@ -131,6 +204,7 @@ async def get_spell(
         "error_pattern": spell.error_pattern,
         "solution_code": spell.solution_code,
         "tags": spell.tags,
+        "repository_id": spell.repository_id,
         "auto_generated": spell.auto_generated,
         "confidence_score": spell.confidence_score,
         "human_reviewed": spell.human_reviewed,
@@ -143,17 +217,27 @@ async def get_spell(
 @router.post("", response_model=SpellResponse, status_code=status.HTTP_201_CREATED)
 async def create_spell(
     spell: SpellCreate,
-    db: AsyncSession = Depends(get_db)
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)]
 ) -> SpellResponse:
     """
     Create a new spell.
     
+    Creates a spell with the provided configuration in a repository owned by
+    the authenticated user. The repository must exist and be accessible to the user.
+    
+    **Authentication required:** Include Bearer token in Authorization header.
+    
     Args:
-        spell: Spell data to create
+        spell: Spell data to create (including repository_id)
         db: Database session dependency
+        current_user: Authenticated user
         
     Returns:
         Created spell object with generated ID and timestamps
+        
+    Raises:
+        HTTPException: 404 if repository not found or not accessible
         
     Example:
         POST /api/spells
@@ -163,36 +247,64 @@ async def create_spell(
             "error_type": "NameError",
             "error_pattern": "name '.*' is not defined",
             "solution_code": "# Define the variable before use",
-            "tags": "python,variables"
+            "tags": "python,variables",
+            "repository_id": 1
         }
-        Response: {"id": 1, "title": "Fix undefined variable", ...}
+        Response: {"id": 1, "title": "Fix undefined variable", "repository_id": 1, ...}
     """
-    db_spell = Spell(**spell.model_dump())
-    db.add(db_spell)
-    await db.commit()
-    await db.refresh(db_spell)
-    return db_spell
+    # Verify repository exists and user has access
+    access_manager = RepositoryAccessManager()
+    has_access = await access_manager.validate_repository_access(
+        current_user.id, spell.repository_id, db
+    )
+    
+    if not has_access:
+        raise_repository_not_found(spell.repository_id)
+    
+    # Create spell with proper error handling
+    try:
+        db_spell = Spell(**spell.model_dump())
+        db.add(db_spell)
+        await db.commit()
+        await db.refresh(db_spell)
+        return db_spell
+    except IntegrityError as e:
+        await db.rollback()
+        log_constraint_violation_attempt(
+            "spell_creation",
+            user_id=current_user.id,
+            repository_id=spell.repository_id,
+            error_details=str(e)
+        )
+        handle_database_constraint_error(e, "spell creation")
 
 
 @router.put("/{spell_id}", response_model=SpellResponse)
 async def update_spell(
     spell_id: int,
     spell: SpellUpdate,
-    db: AsyncSession = Depends(get_db)
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)]
 ) -> SpellResponse:
     """
     Update an existing spell.
+    
+    Allows updating the spell's metadata for spells in repositories owned by 
+    the authenticated user. The repository association cannot be changed.
+    
+    **Authentication required:** Include Bearer token in Authorization header.
     
     Args:
         spell_id: ID of the spell to update
         spell: Updated spell data
         db: Database session dependency
+        current_user: Authenticated user
         
     Returns:
         Updated spell object
         
     Raises:
-        HTTPException: 404 if spell not found
+        HTTPException: 404 if spell not found or not accessible
         
     Example:
         PUT /api/spells/1
@@ -208,38 +320,60 @@ async def update_spell(
     )
     db_spell = result.scalar_one_or_none()
     
-    if db_spell is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Spell with id {spell_id} not found"
+    # Verify repository access using RepositoryAccessManager
+    access_manager = RepositoryAccessManager()
+    has_access = await access_manager.validate_spell_repository_access(
+        current_user.id, spell_id, db
+    )
+    
+    # Use standardized error handling
+    validate_spell_exists_and_accessible(
+        spell_id, current_user.id, db_spell is not None, has_access
+    )
+    
+    # Update fields (excluding repository_id which cannot be changed)
+    try:
+        for field, value in spell.model_dump().items():
+            setattr(db_spell, field, value)
+        
+        await db.commit()
+        await db.refresh(db_spell)
+        return db_spell
+    except IntegrityError as e:
+        await db.rollback()
+        log_constraint_violation_attempt(
+            "spell_update",
+            user_id=current_user.id,
+            spell_id=spell_id,
+            error_details=str(e)
         )
-    
-    # Update fields
-    for field, value in spell.model_dump().items():
-        setattr(db_spell, field, value)
-    
-    await db.commit()
-    await db.refresh(db_spell)
-    return db_spell
+        handle_database_constraint_error(e, "spell update")
 
 
 @router.delete("/{spell_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_spell(
     spell_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)]
 ) -> None:
     """
     Delete a spell by ID.
     
+    Permanently removes the spell and all associated data for spells in
+    repositories owned by the authenticated user. This operation cannot be undone.
+    
+    **Authentication required:** Include Bearer token in Authorization header.
+    
     Args:
         spell_id: ID of the spell to delete
         db: Database session dependency
+        current_user: Authenticated user
         
     Returns:
         None (204 No Content)
         
     Raises:
-        HTTPException: 404 if spell not found
+        HTTPException: 404 if spell not found or not accessible
         
     Example:
         DELETE /api/spells/1
@@ -250,37 +384,57 @@ async def delete_spell(
     )
     db_spell = result.scalar_one_or_none()
     
-    if db_spell is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Spell with id {spell_id} not found"
-        )
+    # Verify repository access using RepositoryAccessManager
+    access_manager = RepositoryAccessManager()
+    has_access = await access_manager.validate_spell_repository_access(
+        current_user.id, spell_id, db
+    )
     
-    await db.delete(db_spell)
-    await db.commit()
+    # Use standardized error handling
+    validate_spell_exists_and_accessible(
+        spell_id, current_user.id, db_spell is not None, has_access
+    )
+    
+    try:
+        await db.delete(db_spell)
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        log_constraint_violation_attempt(
+            "spell_deletion",
+            user_id=current_user.id,
+            spell_id=spell_id,
+            error_details=str(e)
+        )
+        handle_database_constraint_error(e, "spell deletion")
 
 
 @router.post("/{spell_id}/apply", response_model=SpellApplicationResponse)
 async def apply_spell(
     spell_id: int,
     request: SpellApplicationRequest,
-    db: AsyncSession = Depends(get_db)
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)]
 ) -> SpellApplicationResponse:
     """
     Apply a spell to generate a context-aware patch.
     
     Takes a spell's canonical solution (incantation) and adapts it to the
     specific failing code context using an LLM. Returns a git unified diff
-    patch that can be applied to the repository.
+    patch that can be applied to the repository. Only accessible if the user
+    owns the repository containing the spell.
     
     The system constructs a prompt containing the failing context, spell incantation,
     and adaptation constraints, sends it to the configured LLM provider, validates
     the response, and stores the application record in the database.
     
+    **Authentication required:** Include Bearer token in Authorization header.
+    
     Args:
         spell_id: ID of the spell to apply
         request: Spell application request with failing context and constraints
         db: Database session dependency
+        current_user: Authenticated user
         
     Returns:
         SpellApplicationResponse with generated patch, files touched, and rationale
@@ -365,19 +519,22 @@ async def apply_spell(
     )
     spell = result.scalar_one_or_none()
     
-    # Return 404 if spell not found
     if spell is None:
-        logger.warning(
-            "Spell not found",
-            extra={
-                "endpoint": "apply_spell",
-                "spell_id": spell_id
-            }
-        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Spell with id {spell_id} not found"
+            detail="Spell not found"
         )
+    
+    # Verify repository access using RepositoryAccessManager
+    access_manager = RepositoryAccessManager()
+    has_access = await access_manager.validate_spell_repository_access(
+        current_user.id, spell_id, db
+    )
+    
+    # Use standardized error handling
+    validate_spell_exists_and_accessible(
+        spell_id, current_user.id, spell is not None, has_access
+    )
     
     # Set default constraints if not provided
     constraints = request.adaptation_constraints or AdaptationConstraints()

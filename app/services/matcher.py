@@ -8,12 +8,13 @@ and returns a ranked list of spell IDs.
 
 import logging
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.spell import Spell
+from app.models.repository_config import RepositoryConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,11 @@ class MatcherService:
         """
         self.db = db
     
-    async def match_spells(self, error_payload: Dict[str, Any]) -> List[int]:
+    async def match_spells(
+        self, 
+        error_payload: Dict[str, Any],
+        repository_context: Optional[Dict[str, Any]] = None
+    ) -> List[int]:
         """
         Match error payload with relevant spells and return ranked IDs.
         
@@ -62,6 +67,10 @@ class MatcherService:
                 - message: Error message text
                 - context: Optional code context where error occurred
                 - stack_trace: Optional stack trace (not currently used)
+            repository_context: Optional repository context with keys:
+                - repo: Repository name (e.g., "owner/repo")
+                - pr_number: Pull request number
+                - files_changed: List of changed files
                 
         Returns:
             List of spell IDs sorted by relevance (highest score first).
@@ -133,9 +142,10 @@ class MatcherService:
                 }
             )
             
-            # Query database for candidate spells based on error type
+            # Query database for candidate spells based on error type and repository context
             candidate_spells = await self._query_candidate_spells(
-                error_characteristics.get("error_type")
+                error_characteristics.get("error_type"),
+                repository_context
             )
             
             if not candidate_spells:
@@ -237,34 +247,62 @@ class MatcherService:
     
     async def _query_candidate_spells(
         self,
-        error_type: str
+        error_type: str,
+        repository_context: Optional[Dict[str, Any]] = None
     ) -> List[Spell]:
         """
-        Query database for candidate spells based on error type.
+        Query database for candidate spells based on error type and repository context.
         
         Retrieves spells from the database that match the given error type.
+        If repository_context is provided, prioritizes spells from the same repository.
         If error_type is empty or None, returns all spells.
         
         Args:
             error_type: Normalized error type string
+            repository_context: Optional repository context for filtering
             
         Returns:
-            List of Spell objects that match the error type
+            List of Spell objects that match the error type, prioritized by repository
             
         Example:
-            spells = await matcher._query_candidate_spells("typeerror")
+            spells = await matcher._query_candidate_spells("typeerror", {"repo": "owner/repo"})
             # Returns: [Spell(id=1, error_type="TypeError", ...), ...]
         """
         try:
+            # Build base query for spells with error type filter
             if error_type:
-                # Query spells with matching error type (case-insensitive)
                 stmt = select(Spell).where(
                     Spell.error_type.ilike(f"%{error_type}%")
                 )
             else:
-                # If no error type specified, get all spells
                 stmt = select(Spell)
             
+            # If repository context is provided, prioritize spells from the same repository
+            if repository_context and repository_context.get("repo"):
+                repo_name = repository_context["repo"]
+                
+                # First, try to get spells from the same repository
+                repo_stmt = (
+                    stmt.join(RepositoryConfig)
+                    .where(RepositoryConfig.repo_name == repo_name)
+                )
+                
+                repo_result = await self.db.execute(repo_stmt)
+                repo_spells = list(repo_result.scalars().all())
+                
+                if repo_spells:
+                    logger.debug(
+                        f"Found {len(repo_spells)} spells from same repository: {repo_name}",
+                        extra={"error_type": error_type, "repo": repo_name}
+                    )
+                    return repo_spells
+                
+                logger.debug(
+                    f"No spells found in repository {repo_name}, querying all repositories",
+                    extra={"error_type": error_type, "repo": repo_name}
+                )
+            
+            # Fallback to all spells if no repository-specific spells found
             result = await self.db.execute(stmt)
             spells = result.scalars().all()
             

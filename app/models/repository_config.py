@@ -9,7 +9,8 @@ from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from app.db.database import Base
@@ -28,8 +29,13 @@ class RepositoryConfig(Base):
     repo_name = Column(String(255), nullable=False, unique=True, index=True)
     webhook_url = Column(String(500), nullable=False)
     enabled = Column(Boolean, default=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    # Relationships
+    owner = relationship("User", back_populates="repositories")
+    spells = relationship("Spell", back_populates="repository")
 
 
 # Pydantic Schemas
@@ -113,11 +119,14 @@ class RepositoryConfigResponse(RepositoryConfigBase):
     Schema for repository config responses.
     
     This schema includes all database fields plus computed fields
-    for webhook statistics. Returned by all repository config endpoints.
+    for webhook statistics and spell statistics. Returned by all repository config endpoints.
     
     **Computed Fields:**
     - `webhook_count`: Total number of webhook executions for this repository
     - `last_webhook_at`: Timestamp of the most recent webhook execution
+    - `spell_count`: Total number of spells associated with this repository
+    - `auto_generated_spell_count`: Number of auto-generated spells
+    - `manual_spell_count`: Number of manually created spells
     
     **Example:**
     ```json
@@ -126,16 +135,24 @@ class RepositoryConfigResponse(RepositoryConfigBase):
         "repo_name": "octocat/Hello-World",
         "webhook_url": "https://grimoire.example.com/webhook/github",
         "enabled": true,
+        "user_id": 1,
         "created_at": "2025-12-05T10:00:00Z",
         "updated_at": "2025-12-05T12:00:00Z",
         "webhook_count": 15,
-        "last_webhook_at": "2025-12-05T11:45:00Z"
+        "last_webhook_at": "2025-12-05T11:45:00Z",
+        "spell_count": 8,
+        "auto_generated_spell_count": 5,
+        "manual_spell_count": 3
     }
     ```
     """
     id: int = Field(
         ...,
         description="Unique identifier for this repository configuration"
+    )
+    user_id: int = Field(
+        ...,
+        description="ID of the user who owns this repository configuration"
     )
     created_at: datetime = Field(
         ...,
@@ -152,6 +169,30 @@ class RepositoryConfigResponse(RepositoryConfigBase):
     last_webhook_at: Optional[datetime] = Field(
         None,
         description="Timestamp of the most recent webhook execution (computed field)"
+    )
+    spell_count: int = Field(
+        default=0,
+        description="Total number of spells associated with this repository (computed field)"
+    )
+    auto_generated_spell_count: int = Field(
+        default=0,
+        description="Number of auto-generated spells for this repository (computed field)"
+    )
+    manual_spell_count: int = Field(
+        default=0,
+        description="Number of manually created spells for this repository (computed field)"
+    )
+    spell_application_count: int = Field(
+        default=0,
+        description="Total number of spell applications for this repository (computed field)"
+    )
+    last_spell_created_at: Optional[datetime] = Field(
+        None,
+        description="Timestamp when the most recent spell was created for this repository (computed field)"
+    )
+    last_application_at: Optional[datetime] = Field(
+        None,
+        description="Timestamp of the most recent spell application for this repository (computed field)"
     )
     
     model_config = {"from_attributes": True}  # SQLAlchemy 2.0 compatibility

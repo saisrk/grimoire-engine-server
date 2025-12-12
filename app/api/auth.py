@@ -11,6 +11,11 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.utils.error_handlers import (
+    handle_database_constraint_error,
+    log_constraint_violation_attempt
+)
+
 from app.db.database import get_db
 from app.models.user import User, UserCreate, UserLogin, UserResponse, Token
 from app.services.auth_service import (
@@ -121,13 +126,14 @@ async def signup(
             "user": UserResponse.model_validate(user).model_dump()
         }
         
-    except IntegrityError:
-        # Email already exists
+    except IntegrityError as e:
+        # Email already exists or other constraint violation
         await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Email already registered"
+        log_constraint_violation_attempt(
+            "user_registration",
+            error_details=str(e)
         )
+        handle_database_constraint_error(e, "user registration")
 
 
 @router.post(

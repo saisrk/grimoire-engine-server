@@ -401,8 +401,11 @@ async def github_webhook(
                     # Initialize Matcher Service with database session
                     matcher = MatcherService(db)
                     
-                    # Match spells with error payload
-                    matched_spells = await matcher.match_spells(error_payload)
+                    # Match spells with error payload and repository context
+                    matched_spells = await matcher.match_spells(
+                        error_payload, 
+                        repository_context=pr_processing_result
+                    )
                     
                     # Log successful spell matching with metadata
                     logger.info(

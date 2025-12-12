@@ -12,6 +12,12 @@ from typing import Optional, List, Dict, Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
+
+from app.utils.error_handlers import (
+    handle_database_constraint_error,
+    log_constraint_violation_attempt
+)
 
 from app.models.webhook_execution_log import WebhookExecutionLog
 from app.models.repository_config import RepositoryConfig
@@ -248,10 +254,20 @@ async def create_execution_log(
             execution_duration_ms=execution_duration_ms
         )
         
-        # Add to database
-        db.add(log_entry)
-        await db.commit()
-        await db.refresh(log_entry)
+        # Add to database with constraint handling
+        try:
+            db.add(log_entry)
+            await db.commit()
+            await db.refresh(log_entry)
+        except IntegrityError as e:
+            await db.rollback()
+            log_constraint_violation_attempt(
+                "webhook_log_creation",
+                repository_id=repo_config_id,
+                error_details=str(e)
+            )
+            # Re-raise as this is a critical error in webhook processing
+            raise
         
         logger.info(
             f"Created webhook execution log {log_entry.id} for {repo_name}",

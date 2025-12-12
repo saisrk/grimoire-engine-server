@@ -10,9 +10,17 @@ import os
 from typing import Any, Dict, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models.spell import Spell
+from app.models.repository_config import RepositoryConfig
+from app.models.user import User
 from app.services.llm_service import get_llm_service
+from app.utils.error_handlers import (
+    handle_database_constraint_error,
+    log_constraint_violation_attempt
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +119,12 @@ class SpellGeneratorService:
                 }
             )
             
+            # Get or create repository configuration
+            repository_id = await self._get_or_create_repository(pr_context)
+            if not repository_id:
+                logger.warning("Could not determine repository for spell generation")
+                return None
+            
             # Generate content using LLM
             content = await self.llm_service.generate_spell_content(
                 error_payload,
@@ -131,7 +145,8 @@ class SpellGeneratorService:
                 error_pattern=error_pattern,
                 solution_code=content["solution_code"],
                 tags=tags,
-                confidence_score=content["confidence_score"]
+                confidence_score=content["confidence_score"],
+                repository_id=repository_id
             )
             
             logger.info(
@@ -234,6 +249,133 @@ class SpellGeneratorService:
         
         return ",".join(sorted(tags))
     
+    async def _get_or_create_repository(
+        self,
+        pr_context: Optional[Dict[str, Any]]
+    ) -> Optional[int]:
+        """
+        Get or create repository configuration for spell generation.
+        
+        Args:
+            pr_context: PR context containing repository information
+            
+        Returns:
+            Repository ID if found or created, None otherwise
+        """
+        if not pr_context or not pr_context.get("repo"):
+            logger.warning("No repository context provided for spell generation")
+            return None
+        
+        repo_name = pr_context["repo"]
+        
+        try:
+            # First, try to find existing repository configuration
+            result = await self.db.execute(
+                select(RepositoryConfig).where(RepositoryConfig.repo_name == repo_name)
+            )
+            repo_config = result.scalar_one_or_none()
+            
+            if repo_config:
+                logger.debug(f"Found existing repository configuration: {repo_config.id}")
+                return repo_config.id
+            
+            # Repository doesn't exist, create it with a system user
+            # First, get or create a system user for auto-generated repositories
+            system_user = await self._get_or_create_system_user()
+            if not system_user:
+                logger.error("Could not create system user for repository auto-creation")
+                return None
+            
+            # Create new repository configuration
+            new_repo_config = RepositoryConfig(
+                repo_name=repo_name,
+                webhook_url=f"https://api.github.com/repos/{repo_name}/hooks",  # Default webhook URL
+                enabled=True,
+                user_id=system_user.id
+            )
+            
+            try:
+                self.db.add(new_repo_config)
+                await self.db.commit()
+                await self.db.refresh(new_repo_config)
+            except IntegrityError as e:
+                await self.db.rollback()
+                log_constraint_violation_attempt(
+                    "auto_repository_creation",
+                    error_details=str(e)
+                )
+                # Re-raise as this is a critical error in webhook processing
+                raise
+            
+            logger.info(
+                f"Auto-created repository configuration: {new_repo_config.id} for {repo_name}",
+                extra={
+                    "repo_id": new_repo_config.id,
+                    "repo_name": repo_name,
+                    "user_id": system_user.id
+                }
+            )
+            
+            return new_repo_config.id
+            
+        except Exception as e:
+            logger.error(
+                f"Error getting or creating repository configuration: {e}",
+                exc_info=True,
+                extra={"repo_name": repo_name}
+            )
+            return None
+    
+    async def _get_or_create_system_user(self) -> Optional[User]:
+        """
+        Get or create a system user for auto-generated repositories.
+        
+        Returns:
+            System user instance or None if creation fails
+        """
+        system_username = "system-auto-generator"
+        system_email = "system@grimoire.local"
+        
+        try:
+            # Try to find existing system user
+            result = await self.db.execute(
+                select(User).where(User.username == system_username)
+            )
+            system_user = result.scalar_one_or_none()
+            
+            if system_user:
+                return system_user
+            
+            # Create system user
+            system_user = User(
+                username=system_username,
+                email=system_email,
+                hashed_password="system-generated-no-login"  # System user cannot login
+            )
+            
+            try:
+                self.db.add(system_user)
+                await self.db.commit()
+                await self.db.refresh(system_user)
+            except IntegrityError as e:
+                await self.db.rollback()
+                log_constraint_violation_attempt(
+                    "system_user_creation",
+                    error_details=str(e)
+                )
+                # Re-raise as this is a critical error in webhook processing
+                raise
+            
+            logger.info(f"Created system user for auto-generation: {system_user.id}")
+            return system_user
+            
+        except Exception as e:
+            logger.error(
+                f"Error creating system user: {e}",
+                exc_info=True
+            )
+            return None
+    
     async def _create_spell_record(
         self,
         title: str,
@@ -242,7 +384,8 @@ class SpellGeneratorService:
         error_pattern: str,
         solution_code: str,
         tags: str,
-        confidence_score: int
+        confidence_score: int,
+        repository_id: int
     ) -> int:
         """
         Create spell record in database.
@@ -269,14 +412,25 @@ class SpellGeneratorService:
             error_pattern=error_pattern,
             solution_code=solution_code,
             tags=tags,
+            repository_id=repository_id,
             auto_generated=1,
             confidence_score=confidence_score,
             human_reviewed=0
         )
         
-        self.db.add(spell)
-        await self.db.commit()
-        await self.db.refresh(spell)
+        try:
+            self.db.add(spell)
+            await self.db.commit()
+            await self.db.refresh(spell)
+        except IntegrityError as e:
+            await self.db.rollback()
+            log_constraint_violation_attempt(
+                "spell_generation",
+                repository_id=repository_id,
+                error_details=str(e)
+            )
+            # Re-raise as this is a critical error in webhook processing
+            raise
         
         logger.debug(
             f"Created spell record in database: {spell.id}",

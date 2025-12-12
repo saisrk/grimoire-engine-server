@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional, List, Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Column, Integer, String, Text, DateTime
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -31,13 +31,15 @@ class Spell(Base):
     error_pattern = Column(Text, nullable=False)
     solution_code = Column(Text, nullable=False)
     tags = Column(String(500))  # Comma-separated tags
+    repository_id = Column(Integer, ForeignKey("repository_configs.id"), nullable=False, index=True)
     auto_generated = Column(Integer, default=0)  # 0=manual, 1=auto-generated
     confidence_score = Column(Integer, default=0)  # 0-100 for auto-generated spells
     human_reviewed = Column(Integer, default=0)  # 0=not reviewed, 1=reviewed
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
-    # Relationship
+    # Relationships
+    repository = relationship("RepositoryConfig", back_populates="spells")
     applications = relationship("SpellApplication", back_populates="spell")
     
     # Extension point: Add vector embedding column when integrating vector DB
@@ -61,17 +63,27 @@ class SpellBase(BaseModel):
 
 class SpellCreate(SpellBase):
     """Schema for creating a new spell."""
-    pass
+    repository_id: int = Field(..., description="ID of the repository this spell belongs to")
 
 
 class SpellUpdate(SpellBase):
     """Schema for updating an existing spell."""
+    # repository_id is not included in updates to prevent moving spells between repositories
     pass
+
+
+class RepositoryInfo(BaseModel):
+    """Repository information included in spell responses."""
+    id: int
+    repo_name: str
+    enabled: bool
 
 
 class SpellResponse(SpellBase):
     """Schema for spell responses (includes DB fields)."""
     id: int
+    repository_id: int
+    repository: Optional[RepositoryInfo] = None
     auto_generated: int
     confidence_score: int
     human_reviewed: int
